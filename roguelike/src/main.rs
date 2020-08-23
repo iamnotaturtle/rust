@@ -3,6 +3,8 @@ use specs::prelude::*;
 use specs_derive::Component;
 use std::cmp::{max, min};
 
+mod map;
+
 #[derive(Component)]
 struct Position {
     x: i32,
@@ -19,34 +21,11 @@ struct Renderable {
 #[derive(Component, Debug)]
 struct Player {}
 
-#[derive(Component)]
-struct LeftMover {}
-struct LeftWalker {}
-
-impl<'a> System<'a> for LeftWalker {
-    type SystemData = (ReadStorage<'a, LeftMover>, WriteStorage<'a, Position>);
-
-    fn run(&mut self, (lefty, mut pos): Self::SystemData) {
-        for (_lefty, pos) in (&lefty, &mut pos).join() {
-            pos.x -= 1;
-            if pos.x < 0 {
-                pos.x = 79;
-            }
-        }
-    }
-}
-
 struct State {
     ecs: World,
 }
 
-impl State {
-    fn run_systems(&mut self) {
-        let mut lw = LeftWalker {};
-        lw.run_now(&self.ecs);
-        self.ecs.maintain();
-    }
-}
+impl State {}
 
 impl GameState for State {
     fn tick(&mut self, ctx: &mut Rltk) {
@@ -54,7 +33,8 @@ impl GameState for State {
 
         player_input(self, ctx);
 
-        self.run_systems();
+        let map = self.ecs.fetch::<Vec<map::TileType>>();
+        map::draw_map(&map, ctx);
 
         let positions = self.ecs.read_storage::<Position>();
         let renderables = self.ecs.read_storage::<Renderable>();
@@ -73,7 +53,6 @@ fn main() {
     let mut gs = State { ecs: World::new() };
     gs.ecs.register::<Position>();
     gs.ecs.register::<Renderable>();
-    gs.ecs.register::<LeftMover>();
     gs.ecs.register::<Player>();
 
     gs.ecs
@@ -81,40 +60,37 @@ fn main() {
         .with(Position { x: 40, y: 25 })
         .with(Renderable {
             glyph: rltk::to_cp437('@') as u8,
-            fg: RGB::named(rltk::YELLOW),
+            fg: RGB::named(rltk::RED),
             bg: RGB::named(rltk::BLACK),
         })
         .with(Player {})
         .build();
 
-    // Create an entity
-    for i in 0..10 {
-        gs.ecs
-            .create_entity()
-            .with(Position { x: i * 7, y: 20 })
-            .with(Renderable {
-                glyph: rltk::to_cp437('☺') as u8,
-                fg: RGB::named(rltk::RED),
-                bg: RGB::named(rltk::BLACK),
-            })
-            .with(LeftMover {})
-            .build();
-    }
+    gs.ecs.insert(map::new_map());
+
     let ctx = match context {
         Ok(context) => context,
         Err(error) => panic!("Problem unwrapping the context: {:?}", error),
     };
-    rltk::main_loop(ctx, gs);
+
+    match rltk::main_loop(ctx, gs) {
+        Err(error) => println!("Error running main_loop: {:?}", error),
+        _ => (),
+    }
 }
 
 // Player functions
 fn try_move_player(delta_x: i32, delta_y: i32, ecs: &mut World) {
     let mut positions = ecs.write_storage::<Position>();
     let mut players = ecs.write_storage::<Player>();
+    let map = ecs.fetch::<Vec<map::TileType>>();
 
     for (_player, pos) in (&mut players, &mut positions).join() {
-        pos.x = min(79, max(0, pos.x + delta_x));
-        pos.y = min(49, max(0, pos.y + delta_y));
+        let destination_idx = map::xy_idx(pos.x + delta_x, pos.y + delta_y);
+        if map[destination_idx] != map::TileType::Wall {
+            pos.x = min(79, max(0, pos.x + delta_x));
+            pos.y = min(49, max(0, pos.y + delta_y));
+        }
     }
 }
 
