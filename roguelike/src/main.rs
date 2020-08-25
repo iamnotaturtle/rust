@@ -1,108 +1,148 @@
-use rltk::{GameState, Rltk, VirtualKeyCode, RGB};
+use rltk::{GameState, Point, Rltk, RGB};
 use specs::prelude::*;
-use specs_derive::Component;
-use std::cmp::{max, min};
 
+mod components;
+pub use components::*;
 mod map;
+pub use map::*;
+mod player;
+use player::*;
+mod rect;
+pub use rect::Rect;
+mod visibility_system;
+use visibility_system::VisibilitySystem;
+mod monster_ai_system;
+use monster_ai_system::MonsterAI;
 
-#[derive(Component)]
-struct Position {
-    x: i32,
-    y: i32,
+#[derive(PartialEq, Copy, Clone)]
+pub enum RunState {
+    Paused,
+    Running,
 }
 
-#[derive(Component)]
-struct Renderable {
-    glyph: u8,
-    fg: RGB,
-    bg: RGB,
+pub struct State {
+    pub ecs: World,
+    pub runstate: RunState,
 }
 
-#[derive(Component, Debug)]
-struct Player {}
-
-struct State {
-    ecs: World,
+impl State {
+    fn run_systems(&mut self) {
+        let mut vis = VisibilitySystem {};
+        vis.run_now(&self.ecs);
+        let mut mob = MonsterAI {};
+        mob.run_now(&self.ecs);
+        self.ecs.maintain();
+    }
 }
-
-impl State {}
 
 impl GameState for State {
     fn tick(&mut self, ctx: &mut Rltk) {
         ctx.cls();
 
-        player_input(self, ctx);
+        if self.runstate == RunState::Running {
+            self.run_systems();
+            self.runstate = RunState::Paused;
+        } else {
+            self.runstate = player_input(self, ctx);
+        }
 
-        let map = self.ecs.fetch::<Vec<map::TileType>>();
-        map::draw_map(&map, ctx);
+        draw_map(&self.ecs, ctx);
 
         let positions = self.ecs.read_storage::<Position>();
         let renderables = self.ecs.read_storage::<Renderable>();
+        let map = self.ecs.fetch::<Map>();
 
         for (pos, render) in (&positions, &renderables).join() {
-            ctx.set(pos.x, pos.y, render.fg, render.bg, render.glyph)
+            let idx = map.xy_idx(pos.x, pos.y);
+            if map.visible_tiles[idx] {
+                ctx.set(pos.x, pos.y, render.fg, render.bg, render.glyph);
+            }
         }
     }
 }
 
-fn main() {
-    let context = rltk::RltkBuilder::simple80x50()
+fn main() -> rltk::BError {
+    use rltk::RltkBuilder;
+    let context = RltkBuilder::simple80x50()
         .with_title("Roguelike Tutorial")
-        .build();
-
-    let mut gs = State { ecs: World::new() };
+        .build()?;
+    let mut gs = State {
+        ecs: World::new(),
+        runstate: RunState::Running,
+    };
     gs.ecs.register::<Position>();
     gs.ecs.register::<Renderable>();
     gs.ecs.register::<Player>();
+    gs.ecs.register::<Viewshed>();
+    gs.ecs.register::<Monster>();
+    gs.ecs.register::<Name>();
+
+    let map: Map = Map::new_map_rooms_and_corridors();
+    let (player_x, player_y) = map.rooms[0].center();
+
+    // Spawn monsters
+    let mut rng = rltk::RandomNumberGenerator::new();
+    for (i, room) in map.rooms.iter().skip(1).enumerate() {
+        let (x, y) = room.center();
+
+        let glyph: u16;
+        let name: String;
+        let roll = rng.roll_dice(1, 2);
+        match roll {
+            1 => {
+                glyph = rltk::to_cp437('g');
+                name = "Goblin".to_string();
+            }
+            _ => {
+                glyph = rltk::to_cp437('o');
+                name = "Orc".to_string();
+            }
+        }
+
+        gs.ecs
+            .create_entity()
+            .with(Position { x, y })
+            .with(Renderable {
+                glyph: glyph,
+                fg: RGB::named(rltk::RED),
+                bg: RGB::named(rltk::BLACK),
+            })
+            .with(Viewshed {
+                visible_tiles: Vec::new(),
+                range: 8,
+                dirty: true,
+            })
+            .with(Monster {})
+            .with(Name {
+                name: format!("{} #{}", &name, i),
+            })
+            .build();
+    }
+
+    gs.ecs.insert(map);
+    gs.ecs.insert(Point::new(player_x, player_y));
 
     gs.ecs
         .create_entity()
-        .with(Position { x: 40, y: 25 })
+        .with(Position {
+            x: player_x,
+            y: player_y,
+        })
         .with(Renderable {
-            glyph: rltk::to_cp437('@') as u8,
-            fg: RGB::named(rltk::RED),
+            glyph: rltk::to_cp437('@'),
+            fg: RGB::named(rltk::YELLOW),
             bg: RGB::named(rltk::BLACK),
         })
         .with(Player {})
+        .with(Viewshed {
+            visible_tiles: Vec::new(),
+            range: 8,
+            dirty: true,
+        })
+        .with(Name {
+            name: "Player".to_string(),
+        })
         .build();
 
-    gs.ecs.insert(map::new_map());
-
-    let ctx = match context {
-        Ok(context) => context,
-        Err(error) => panic!("Problem unwrapping the context: {:?}", error),
-    };
-
-    match rltk::main_loop(ctx, gs) {
-        Err(error) => println!("Error running main_loop: {:?}", error),
-        _ => (),
-    }
-}
-
-// Player functions
-fn try_move_player(delta_x: i32, delta_y: i32, ecs: &mut World) {
-    let mut positions = ecs.write_storage::<Position>();
-    let mut players = ecs.write_storage::<Player>();
-    let map = ecs.fetch::<Vec<map::TileType>>();
-
-    for (_player, pos) in (&mut players, &mut positions).join() {
-        let destination_idx = map::xy_idx(pos.x + delta_x, pos.y + delta_y);
-        if map[destination_idx] != map::TileType::Wall {
-            pos.x = min(79, max(0, pos.x + delta_x));
-            pos.y = min(49, max(0, pos.y + delta_y));
-        }
-    }
-}
-
-fn player_input(gs: &mut State, ctx: &mut Rltk) {
-    match ctx.key {
-        None => {}
-        Some(key) => match key {
-            VirtualKeyCode::Left => try_move_player(-1, 0, &mut gs.ecs),
-            VirtualKeyCode::Right => try_move_player(1, 0, &mut gs.ecs),
-            VirtualKeyCode::Up => try_move_player(0, -1, &mut gs.ecs),
-            VirtualKeyCode::Down => try_move_player(0, 1, &mut gs.ecs),
-            _ => {}
-        },
-    }
+    rltk::main_loop(context, gs)
 }
